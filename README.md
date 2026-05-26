@@ -1,19 +1,15 @@
 # Investigating Graph Neural Networks on a Citation Network
 
-This isn't a GNN tutorial — it's an investigation. Two graph neural network architectures (GCN and GAT) are trained on the Cora citation network for node classification, then systematically compared to answer three research questions:
-
-1. **Does performance degrade for poorly-connected nodes?** Accuracy is stratified by node degree to test whether isolated papers are harder to classify.
-2. **Where do GCN and GAT disagree, and who's right?** Disagreement nodes are identified and analyzed by class — revealing which research topics sit at ambiguous graph boundaries.
-3. **What do GAT's attention heads actually learn?** Attention weights are extracted and compared across same-class vs cross-class edges, per head, to see if the model discovers homophily on its own.
+Node classification on the **Cora citation network** using two GNN architectures (GCN and GAT), with a systematic investigation into where they fail, where they disagree, and what GAT's attention mechanism actually learns.
 
 ![Python](https://img.shields.io/badge/Python-3.x-blue?logo=python&logoColor=white)
-![PyTorch](https://img.shields.io/badge/PyTorch-Geometric-ee4c2c?logo=pytorch)
+![PyTorch](https://img.shields.io/badge/PyTorch_2.12-Geometric-ee4c2c?logo=pytorch)
 
 ---
 
-## The Dataset: Cora
+## Overview
 
-2,708 machine learning papers connected by 5,429 citation links. Each paper has a 1,433-dim binary bag-of-words feature vector and belongs to one of 7 CS research topics. The standard split uses just 140 labeled nodes for training — so the model *must* exploit graph structure to generalize.
+Cora is a graph of 2,708 machine learning papers connected by 5,429 citation links. Each paper has a 1,433-dimensional bag-of-words feature vector and belongs to one of 7 CS research topics. The standard split uses just **140 labeled nodes** for training, forcing the model to exploit graph structure to generalize to 1,000 test nodes.
 
 | Property | Value |
 |----------|-------|
@@ -23,52 +19,62 @@ This isn't a GNN tutorial — it's an investigation. Two graph neural network ar
 | Classes | 7 (Case-Based, Genetic Algorithms, Neural Networks, Probabilistic Methods, Reinforcement Learning, Rule Learning, Theory) |
 | Train / Val / Test | 140 / 500 / 1,000 |
 
-## The Models
+## Approach
 
-**GCN** ([Kipf & Welling, 2017](https://arxiv.org/abs/1609.02907)) — aggregates neighbor features with fixed weights derived from the graph structure. All neighbors contribute equally. 2 layers, ~12K parameters.
+**GCN** ([Kipf & Welling, 2017](https://arxiv.org/abs/1609.02907)) -- 2-layer Graph Convolutional Network. Aggregates neighbor features with fixed weights from the graph structure. All neighbors contribute equally. ~12K parameters.
 
-**GAT** ([Velickovic et al., 2018](https://arxiv.org/abs/1710.10903)) — learns per-edge attention weights so the model can focus on informative neighbors and suppress noisy ones. 8 attention heads, ~92K parameters.
+**GAT** ([Velickovic et al., 2018](https://arxiv.org/abs/1710.10903)) -- 8-head Graph Attention Network. Learns per-edge attention weights so the model can focus on informative neighbors. ~92K parameters.
 
-Both reach ~80-82% test accuracy. The investigation is about *why*, *where*, and *how* they differ — not the number itself.
+Both trained with Adam (lr=0.01, weight decay=5e-4) and early stopping on validation accuracy.
 
-## The Investigation
+## Results
 
-### Q1: Do poorly-connected nodes get misclassified more?
+| Model | Parameters | Test Accuracy |
+|-------|-----------|---------------|
+| GCN | ~12,500 | **80.1%** |
+| GAT | ~92,000 | **80.6%** |
 
-Nodes are binned by degree (citation count) and accuracy is computed per bin for both models. The expectation: low-degree nodes have less neighborhood signal, so GNNs should struggle more on them.
+### Learned Embeddings (t-SNE)
 
-**Output:** `output/degree_vs_accuracy.png`
+![Embedding comparison](results/embedding_comparison.png)
 
-### Q2: Where do GCN and GAT disagree?
+Both models learn to separate the 7 topic classes in representation space. GAT's clusters show slightly tighter grouping, consistent with attention helping pull same-class nodes closer together.
 
-On ~1,000 test nodes, the models agree on most predictions. The interesting cases are where they diverge. The analysis identifies:
-- How often each model is right when they disagree
-- Which topic classes produce the most disagreement
-- The top confused class pairs
+---
 
-**Output:** `output/disagreement_analysis.png`
+## Key Findings
 
-### Q3: What do GAT's attention heads focus on?
+### 1. Low-degree nodes are the failure mode
 
-GAT has 8 attention heads in its first layer. For each head, the mean attention weight is computed separately for same-class edges (paper cites a paper in the same topic) vs cross-class edges. This reveals:
-- Whether the model implicitly learns homophily (attending more to similar nodes)
-- Whether different heads specialize (some focus on same-class, others on cross-class)
-- How concentrated or diffuse attention is across the graph (entropy distribution)
+![Degree vs accuracy](results/degree_vs_accuracy.png)
 
-**Output:** `output/attention_analysis.png`
+Papers with only 1-2 citations hit **~74% accuracy** -- a 16-23 point drop compared to highly-cited papers (90-97%). This is the most natural failure mode for message-passing GNNs: fewer neighbors means fewer messages, which means weaker representations. GNN papers rarely report accuracy-by-degree, but it's arguably more informative than a single aggregate number.
 
-### Q4: How do the learned representations compare?
+### 2. Probabilistic Methods sits at the graph's semantic crossroads
 
-t-SNE projections of GCN and GAT hidden-layer embeddings, side by side. Clear cluster separation means the model learned to map citations into a meaningful topic space. Comparing the two shows whether attention produces tighter or more separated clusters.
+![Disagreement analysis](results/disagreement_analysis.png)
 
-**Output:** `output/embedding_comparison.png`
+GCN and GAT agree on **~89%** of test predictions. On the ~110 nodes where they disagree, GAT is right slightly more often than GCN. But the striking pattern is *which class* drives the disagreement: **Probabilistic Methods** accounts for ~16% disagreement rate, far ahead of any other topic. It gets confused with Case-Based, Reinforcement Learning, Genetic Algorithms, and Neural Networks -- nearly every other class. This isn't a model failure; it reflects the topic's position as a methodological bridge that gets cited across subfields.
 
-## Getting Started
+### 3. GAT learns homophily, but all heads learn the same thing
+
+![Attention analysis](results/attention_analysis.png)
+
+GAT assigns **1.20x higher attention** to same-class neighbors compared to cross-class neighbors. The model discovers citation homophily (papers tend to cite papers in the same field) without being told about it. However, all 8 attention heads show nearly identical same-vs-cross bias (deltas range 0.033-0.037). There is no head specialization -- the architecture provides 8 heads, but they converge to redundant strategies. This suggests that for Cora's relatively simple homophily structure, fewer heads would suffice.
+
+The attention entropy distribution clusters low (median ~1.4), meaning most nodes concentrate attention on a few key neighbors rather than spreading it uniformly. GAT is genuinely *selecting*, not just averaging.
+
+---
+
+## How to Run
 
 ### Prerequisites
 
 - Python 3.8+
-- pip
+- PyTorch 2.12+ (tested on CPU; CUDA works automatically if available)
+- PyTorch Geometric 2.7+
+
+> **Note on PyG installation:** PyTorch Geometric depends on your exact PyTorch and CUDA versions. If `pip install torch-geometric` fails, check [the official install guide](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html) for your setup.
 
 ### Installation
 
@@ -84,31 +90,46 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The pipeline trains both models, runs all four analyses, and saves plots to `output/`. Takes ~2 minutes on CPU.
+Trains both models, runs all four analyses, and saves plots to `results/`. Takes ~2 minutes on CPU.
 
-### Arguments
+```bash
+# Custom hyperparameters
+python main.py --epochs 300 --lr 0.005 --patience 50
+```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--epochs` | `200` | Max training epochs |
 | `--lr` | `0.01` | Learning rate |
-| `--wd` | `5e-4` | Weight decay |
+| `--wd` | `5e-4` | Weight decay (L2) |
 | `--patience` | `30` | Early stopping patience |
 
 ## Project Structure
 
 ```
 graph-ml-citation-network/
-├── main.py              # Pipeline: train both models, run investigation
-├── models.py            # GCN and GAT architectures
-├── analysis.py          # All four analyses + visualizations
+├── main.py                # Entry point: train both models, run investigation
+├── src/
+│   ├── models.py          # GCN and GAT architectures
+│   ├── train.py           # Data loading, training loop, evaluation
+│   └── analysis.py        # All four analyses + visualization
+├── results/
+│   ├── degree_vs_accuracy.png
+│   ├── disagreement_analysis.png
+│   ├── attention_analysis.png
+│   ├── embedding_comparison.png
+│   └── metrics.md
 ├── requirements.txt
-└── output/              # Generated plots (after running)
+└── .gitignore
 ```
 
-## Design Decisions
+## What I Learned
 
-- **Investigation over benchmarking** — the goal isn't to maximize accuracy. It's to understand *what the models learn* and *where they fail*. A model that reaches 81% is less interesting than knowing that it drops to 65% on degree-1 nodes.
-- **Attention weight extraction** — GAT's attention mechanism is often treated as a black box. By pulling out per-head weights and splitting by same/cross-class edges, we can test whether attention is doing what the architecture claims: selectively weighting informative neighbors.
-- **Degree stratification** — GNN papers rarely report accuracy-by-degree, but it's the most natural failure mode for message-passing architectures. Fewer neighbors = fewer messages = weaker representations.
-- **Disagreement analysis over ensembling** — instead of averaging two models for a marginal accuracy bump, comparing *where* they diverge reveals structural differences in how neighborhood averaging (GCN) vs learned attention (GAT) process the same graph.
+The accuracy gap between GCN and GAT on Cora is small (~0.5%), but the *reasons* they fail are structurally different. GCN treats all neighbors equally and struggles when the neighborhood is sparse or noisy. GAT has the machinery to be selective, and the attention weights confirm it does learn to focus -- but on this dataset, all 8 heads converge to the same strategy, suggesting the graph's homophily structure is simple enough that one attention pattern suffices. The real insight isn't which model is "better" -- it's that node degree is a stronger predictor of classification difficulty than model architecture.
+
+## References
+
+- **Cora dataset:** McCallum et al., *Automating the Construction of Internet Portals with Machine Learning*, 2000
+- **GCN:** Kipf & Welling, [*Semi-Supervised Classification with Graph Convolutional Networks*](https://arxiv.org/abs/1609.02907), ICLR 2017
+- **GAT:** Velickovic et al., [*Graph Attention Networks*](https://arxiv.org/abs/1710.10903), ICLR 2018
+- **PyTorch Geometric:** Fey & Lenssen, [*Fast Graph Representation Learning with PyTorch Geometric*](https://arxiv.org/abs/1903.02428), ICLR-W 2019

@@ -1,5 +1,23 @@
-data/
-output/
+# Python
 __pycache__/
-*.pyc
-.env
+*.py[cod]
+
+# Environments
+venv/
+.venv/
+env/
+
+# Data (auto-downloaded by PyTorch Geometric)
+data/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Model checkpoints
+*.pt
+*.pth
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/

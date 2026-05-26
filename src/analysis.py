@@ -163,33 +163,45 @@ def attention_analysis(gat_model, data, output_dir="results"):
 
     avg_attn = attn_weights.mean(dim=1)
     labels = data.y.cpu()
-    src_labels = labels[attn_edge_index[0]]
-    dst_labels = labels[attn_edge_index[1]]
-    same_class = (src_labels == dst_labels)
-
-    attn_same = avg_attn[same_class].numpy()
-    attn_diff = avg_attn[~same_class].numpy()
-
+    src = attn_edge_index[0]
+    dst = attn_edge_index[1]
     n_heads = attn_weights.shape[1]
 
+    # Separate self-loops from real edges — GATConv adds self-loops by default,
+    # and a node attending to itself is trivially same-class.
+    self_loop = (src == dst)
+    real_edge = ~self_loop
+    n_self = self_loop.sum().item()
+    n_real = real_edge.sum().item()
+
+    src_labels = labels[src[real_edge]]
+    dst_labels = labels[dst[real_edge]]
+    same_class = (src_labels == dst_labels)
+
+    attn_real = avg_attn[real_edge]
+    attn_same = attn_real[same_class].numpy()
+    attn_diff = attn_real[~same_class].numpy()
+
     print(f"  Attention Weight Analysis (Layer 1, {n_heads} heads, averaged):")
-    print(f"    Total edges: {len(avg_attn)}")
+    print(f"    Total edges (with self-loops): {len(avg_attn)}")
+    print(f"    Self-loops removed: {n_self}")
+    print(f"    Real edges analyzed: {n_real}")
     print(f"    Same-class edges:  {same_class.sum().item()} ({same_class.float().mean():.1%})")
     print(f"    Cross-class edges: {(~same_class).sum().item()} ({(~same_class).float().mean():.1%})")
     print(f"    Mean attention on same-class neighbors:  {attn_same.mean():.4f}")
     print(f"    Mean attention on cross-class neighbors: {attn_diff.mean():.4f}")
     ratio = attn_same.mean() / attn_diff.mean() if attn_diff.mean() > 0 else float("inf")
-    print(f"    Ratio (same/cross): {ratio:.2f}x")
+    print(f"    Ratio (same/cross, self-loops excluded): {ratio:.2f}x")
     print()
 
     per_head_same = []
     per_head_diff = []
     for h in range(n_heads):
-        head_w = attn_weights[:, h]
+        head_w = attn_weights[real_edge, h]
         per_head_same.append(head_w[same_class].mean().item())
         per_head_diff.append(head_w[~same_class].mean().item())
 
-    print(f"    Per-head breakdown:")
+    print(f"    Per-head breakdown (self-loops excluded):")
     for h in range(n_heads):
         delta = per_head_same[h] - per_head_diff[h]
         marker = "*" if abs(delta) > 0.005 else " "
@@ -197,15 +209,29 @@ def attention_analysis(gat_model, data, output_dir="results"):
               f"delta={delta:+.4f} {marker}")
     print()
 
-    entropies = []
+    # Normalized entropy: H(node) / ln(degree) where 1.0 = perfectly uniform.
+    # Raw entropy is misleading because it scales with degree — a node with 4
+    # neighbors at uniform attention has H = ln(4) = 1.39, not "concentrated."
+    norm_entropies = []
     for node_id in range(data.num_nodes):
         mask = attn_edge_index[1] == node_id
-        if mask.sum() > 0:
+        k = mask.sum().item()
+        if k > 1:
             w_node = avg_attn[mask]
             w_norm = w_node / w_node.sum()
             entropy = -(w_norm * w_norm.clamp(min=1e-9).log()).sum().item()
-            entropies.append(entropy)
-    entropies = np.array(entropies)
+            max_entropy = np.log(k)
+            norm_entropies.append(entropy / max_entropy)
+    norm_entropies = np.array(norm_entropies)
+
+    print(f"    Normalized attention entropy (H / ln(degree), 1.0 = uniform):")
+    print(f"      Median: {np.median(norm_entropies):.3f}")
+    print(f"      Mean:   {np.mean(norm_entropies):.3f}")
+    pct_high = (norm_entropies > 0.95).mean()
+    pct_low = (norm_entropies < 0.80).mean()
+    print(f"      Near-uniform (>0.95): {pct_high:.1%}")
+    print(f"      Concentrated (<0.80): {pct_low:.1%}")
+    print()
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
@@ -213,7 +239,7 @@ def attention_analysis(gat_model, data, output_dir="results"):
     axes[0].hist(attn_diff, bins=50, alpha=0.7, color="#ef4444", label="Cross class", density=True)
     axes[0].set_xlabel("Attention Weight")
     axes[0].set_ylabel("Density")
-    axes[0].set_title("Does GAT Attend More to Same-Class Neighbors?")
+    axes[0].set_title("Same vs Cross-Class Attention (self-loops excluded)")
     axes[0].legend()
     axes[0].grid(alpha=0.3)
 
@@ -223,17 +249,18 @@ def attention_analysis(gat_model, data, output_dir="results"):
     axes[1].bar(x + w / 2, per_head_diff, w, label="Cross class", color="#ef4444", alpha=0.85)
     axes[1].set_xlabel("Attention Head")
     axes[1].set_ylabel("Mean Attention")
-    axes[1].set_title("Per-Head: Same vs Cross-Class Attention")
+    axes[1].set_title("Per-Head: Same vs Cross-Class (self-loops excluded)")
     axes[1].set_xticks(x)
     axes[1].legend()
     axes[1].grid(axis="y", alpha=0.3)
 
-    axes[2].hist(entropies, bins=50, color="#8b5cf6", alpha=0.8)
-    axes[2].axvline(np.median(entropies), color="#f59e0b", linestyle="--",
-                    label=f"Median: {np.median(entropies):.2f}")
-    axes[2].set_xlabel("Attention Entropy")
+    axes[2].hist(norm_entropies, bins=50, color="#8b5cf6", alpha=0.8)
+    axes[2].axvline(np.median(norm_entropies), color="#f59e0b", linestyle="--",
+                    label=f"Median: {np.median(norm_entropies):.2f}")
+    axes[2].axvline(1.0, color="#ef4444", linestyle=":", alpha=0.5, label="Uniform (1.0)")
+    axes[2].set_xlabel("Normalized Entropy (H / ln(degree))")
     axes[2].set_ylabel("Count")
-    axes[2].set_title("Attention Concentration (Low = Focused, High = Uniform)")
+    axes[2].set_title("Attention Concentration (1.0 = perfectly uniform)")
     axes[2].legend()
     axes[2].grid(alpha=0.3)
 
